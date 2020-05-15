@@ -31,3 +31,7 @@ BEGIN
 	return idx;
 END
 $idx$ LANGUAGE plpgsql;
+
+
+--自定义分隔符
+copy tb_mdtimm_ingrid_cell_dd from 'D:/mdt/mdtimmIngridCellHigh-r-00002.new.csv' delimiter '&' csv;

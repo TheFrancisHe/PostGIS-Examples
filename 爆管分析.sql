@@ -2,28 +2,35 @@ drop table famen_new;
 drop table tiaoyaxiang_new;
 drop table guanduan_new;
 
-create table famen_new_temp as select * from famen_new;
-create table tiaoyaxiang_new_temp as select * from tiaoyaxiang_new;
-create table guanduan_new_temp as select * from guanduan_new;
+--drop table famen_new_temp;
+--drop table tiaoyaxiang_new_temp;
+--drop table guanduan_new_temp;
+--create table famen_new_temp as select * from famen_new;
+--create table tiaoyaxiang_new_temp as select * from tiaoyaxiang_new;
+--create table guanduan_new_temp as select * from guanduan_new;
+
+create table famen_new as select * from famen_new_temp;
+create table tiaoyaxiang_new as select * from tiaoyaxiang_new_temp;
+create table guanduan_new as select * from guanduan_new_temp;
 
 --阀门
 select st_astext(geom) as wkt,* from famen_new;
 select AddGeometryColumn('public', 'famen_new', 'shape', 4326, 'POINT', 2);
-update famen_new set shape = st_force_2d(geom);
+update famen_new set shape = st_force2d(geom);
 select DropGeometryColumn ('public','famen_new','geom');
 alter table famen_new rename shape to geom;
 create index famen_new_idx on famen_new using gist(geom);
 --调压箱
 select st_astext(geom) as wkt,* from tiaoyaxiang_new;
 select AddGeometryColumn('public', 'tiaoyaxiang_new', 'shape', 4326, 'POINT', 2);
-update tiaoyaxiang_new set shape = st_force_2d(geom);
+update tiaoyaxiang_new set shape = st_force2d(geom);
 select DropGeometryColumn ('public','tiaoyaxiang_new','geom');
 alter table tiaoyaxiang_new rename shape to geom;
 create index tiaoyaxiang_new_idx on tiaoyaxiang_new using gist(geom);
 --管段
 select st_astext(geom) as wkt,* from guanduan_new;
 select AddGeometryColumn('public', 'guanduan_new', 'shape', 4326, 'MULTILINESTRING', 2);
-update guanduan_new set shape = st_force_2d(geom);
+update guanduan_new set shape = st_force2d(geom);
 select DropGeometryColumn ('public','guanduan_new','geom');
 alter table guanduan_new rename shape to geom;
 create index guanduan_new_idx on guanduan_new using gist(geom);
@@ -115,7 +122,7 @@ create index guanduan_new_code_idx on guanduan_new_code using gist(geom);
 -----------------------------------------------------对间距小于一定阈值的端点进行归一化编号----------------------------------------------------------------------------
 drop table guanduan_new_code_new;
 create table guanduan_new_code_new as 
-select a.x,a.y,a.code,b.x as bx,b.y as by,b.code as bcode from guanduan_new_code a,guanduan_new_code b where a.geom<->b.geom <0.00000001 and a.code!=b.code;
+select a.x,a.y,a.code,b.x as bx,b.y as by,b.code as bcode from guanduan_new_code a,guanduan_new_code b where ST_Transform(a.geom,3857)<->ST_Transform(b.geom,3857) <0.1 and a.code!=b.code;
 
 delete from guanduan_new_code_new where code in (select code from guanduan_new_code_new where code <=
 (select percentile_disc(0.5) within group ( order by code ) from guanduan_new_code_new));
@@ -175,7 +182,7 @@ left join guanduan_new_codeed c on a.bid=c.gid
 where m.b_2_geom is not null;
 
 --删除穿越但是进行 了裁剪的管段
-delete from guanduan_new_break_breaked where dis>0.00000001;
+delete from guanduan_new_break_breaked where dis>0.1;
 
 -----------------------------------------------------多点打断管段-----------------------------------------------------------------------------------------------
 drop table breaked_guanduan;
@@ -190,8 +197,8 @@ create index breaked_guanduan_idx on breaked_guanduan using gist(geom);
 drop table guanduan_break_code;
 create table guanduan_break_code as
 select a.gid,a.cid,b.code as start_code,c.code as end_code,a.geom from breaked_guanduan a
-left join guanduan_new_code b on st_distance(b.geom,ST_StartPoint(ST_GeometryN(a.geom,1)))<0.00000001
-left join guanduan_new_code c on st_distance(c.geom,ST_EndPoint(ST_GeometryN(a.geom,ST_NumGeometries(a.geom))))<0.00000001;
+left join guanduan_new_code b on st_distance(ST_Transform(b.geom,3857),ST_Transform(ST_StartPoint(ST_GeometryN(a.geom,1)),3857))<0.1
+left join guanduan_new_code c on st_distance(ST_Transform(c.geom,3857),ST_Transform(ST_EndPoint(ST_GeometryN(a.geom,ST_NumGeometries(a.geom))),3857))<0.1;
 
 -----------------------------------------------------合并生成新的管段-----------------------------------------------------------------------------------------------
 drop table new_guanduan;
@@ -358,7 +365,7 @@ END;
 $idx$ LANGUAGE plpgsql;
 
 --爆管分析
-select a.gid,a.cid,a.id,a.code,a.name,d.famen_code,d.tiaoyaxiang_code,st_astext(a.geom) as wkt,st_astext(b.geom) as famen_wkt,st_astext(c.geom) as tiaoyaxiang_wkt from queryPipeline(103.5551550156749, 29.437856990113946,null,null) d left join famen_new b on d.famen_code=b.code left join tiaoyaxiang_new c on d.tiaoyaxiang_code=c.code left join guanduan_network a on a.id=d.id where d.id is not null;
+select a.gid,a.cid,a.id,a.code,a.name,d.famen_code,d.tiaoyaxiang_code,st_astext(a.geom) as wkt,st_astext(b.geom) as famen_wkt,st_astext(c.geom) as tiaoyaxiang_wkt from queryPipeline(103.55215025741097, 29.436887372432007,null,null) d left join famen_new b on d.famen_code=b.code left join tiaoyaxiang_new c on d.tiaoyaxiang_code=c.code left join guanduan_network a on a.id=d.id where d.id is not null;
 
 -----------------------------------------------------爆管分析下游受影响阀门存储过程---------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION queryDownPipeline(lon float,lat float) 

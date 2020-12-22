@@ -1,11 +1,11 @@
---用到的原始文件在shp下面
 drop table famen_new;
 drop table tiaoyaxiang_new;
 drop table guanduan_new;
 
-create table famen_new as select * from famen_new_temp;
-create table tiaoyaxiang_new as select * from tiaoyaxiang_new_temp;
-create table guanduan_new as select * from guanduan_new_temp;
+create table famen_new_temp as select * from famen_new;
+create table tiaoyaxiang_new_temp as select * from tiaoyaxiang_new;
+create table guanduan_new_temp as select * from guanduan_new;
+
 --阀门
 select st_astext(geom) as wkt,* from famen_new;
 select AddGeometryColumn('public', 'famen_new', 'shape', 4326, 'POINT', 2);
@@ -86,7 +86,7 @@ update guanduan_new set yend= st_y(ST_EndPoint(ST_GeometryN(geom,ST_NumGeometrie
 --update guanduan_new set xend= CAST(xend as DECIMAL(18,6));
 --update guanduan_new set yend= CAST(yend as DECIMAL(18,6));
 
---管段有闭环的情况
+--管段有闭环的情况（关注第一个ring和最后一个ring，如果闭环，则取第二个或倒数第二个）
 update guanduan_new set xstart=st_x(ST_StartPoint(ST_GeometryN(geom,2))),ystart=st_y(ST_StartPoint(ST_GeometryN(geom,2))) where gid in(
 select gid from (
 select n.gid,i as cid from guanduan_new n CROSS JOIN generate_series(1,ST_NumGeometries(n.geom)) i where st_astext(ST_StartPoint(ST_GeometryN(n.geom, i)))=st_astext(ST_EndPoint(ST_GeometryN(n.geom, i)))
@@ -99,7 +99,6 @@ select n.gid,i as cid,n.geom from guanduan_new n CROSS JOIN generate_series(1,ST
 
 delete from guanduan_new where xstart=xend and ystart=yend;
 
-select *,st_astext(geom) from guanduan_new where gid=2870 or gid=2170
 -----------------------------------------------------提取不重复的交点,并进行编号----------------------------------------------------------------------------
 drop table guanduan_new_code;
 create table guanduan_new_code as
@@ -109,11 +108,23 @@ union
 select xend as x,yend as y from guanduan_new) t;
 alter table guanduan_new_code add code serial4;
 
-select *,st_astext(geom) from guanduan_new_codeed where start_code=947 or end_code=947;
------------------------------------------------------端点基础表---------------------------------------------------------------------------------------------
 select AddGeometryColumn('public', 'guanduan_new_code', 'geom', 4326, 'POINT', 2);
 update guanduan_new_code set geom=ST_GeomFromText('POINT('||x||' '||y||')',4326);
 create index guanduan_new_code_idx on guanduan_new_code using gist(geom);
+
+-----------------------------------------------------对间距小于一定阈值的端点进行归一化编号----------------------------------------------------------------------------
+drop table guanduan_new_code_new;
+create table guanduan_new_code_new as 
+select a.x,a.y,a.code,b.x as bx,b.y as by,b.code as bcode from guanduan_new_code a,guanduan_new_code b where a.geom<->b.geom <0.00000001 and a.code!=b.code;
+
+delete from guanduan_new_code_new where code in (select code from guanduan_new_code_new where code <=
+(select percentile_disc(0.5) within group ( order by code ) from guanduan_new_code_new));
+
+update guanduan_new_code t
+set code = m.code
+from guanduan_new_code_new m
+where t.code = m.bcode;
+-----------------------------------------------------端点基础表---------------------------------------------------------------------------------------------
 
 drop table guanduan_new_codeed;
 create table guanduan_new_codeed as
@@ -125,6 +136,7 @@ drop table guanduan_new_start_no_end;
 create table guanduan_new_start_no_end as 
 select * from guanduan_new_codeed where start_code not in (select end_code from guanduan_new_codeed);
 -----------------------------------------------------查询两两相交管段(裁剪管段不和被裁剪管段收尾相交)---------------------------------------------------------
+--ageom为裁剪管段，bgeom为被裁剪管段
 drop table guanduan_new_un_break;
 create table guanduan_new_un_break as 
 select a.gid as aid,a.geom as ageom,b.gid as bid,b.geom as bgeom from
@@ -142,6 +154,7 @@ drop table guanduan_new_needed_break;
 create table guanduan_new_needed_break as 
 select aid,bid,ageom,bgeom from guanduan_new_need_break where ST_NumGeometries(ST_Split(bgeom, ageom))<=2;
 
+--select aid,bid,ageom,bgeom from guanduan_new_need_break where st_distance(bgeom, ageom)<=0.0000001;
 -----------------------------------------------------打断管段--------------------------------------------------------------------------------------------------
 drop table guanduan_new_break_breaked;
 create table guanduan_new_break_breaked as 
@@ -153,27 +166,32 @@ c.end_code,
 ST_GeometryN(ST_Split(a.bgeom, a.ageom),1) as b_1_geom,--裁剪的管段一半
 ST_GeometryN(ST_Split(a.bgeom, a.ageom),2) as b_2_geom,
 ST_Intersection(a.bgeom, a.ageom) as geom, --交点
-st_distance(ST_Transform(ST_Intersection(a.bgeom, a.ageom),3857),ST_Transform(ST_StartPoint(ST_GeometryN(bgeom,1)),3857)) as distance -- 交点到被裁剪管段的距离，进行排序
+st_distance(ST_Transform(ST_Intersection(a.bgeom, a.ageom),3857),ST_Transform(ST_StartPoint(ST_GeometryN(bgeom,1)),3857)) as distance, -- 交点到被裁剪管段的距离，进行排序
+st_distance(ST_Transform(ST_Intersection(a.bgeom, a.ageom),3857),ST_Transform(ST_StartPoint(ST_GeometryN(ageom,1)),3857)) as dis --交点到裁剪管点起点的距离，大于0.0000001就不应该裁剪（穿越）
 from guanduan_new_needed_break a
 left join guanduan_new_codeed b on a.aid=b.gid
 left join guanduan_new_codeed c on a.bid=c.gid
 ) m 
 where m.b_2_geom is not null;
 
+--删除穿越但是进行 了裁剪的管段
+delete from guanduan_new_break_breaked where dis>0.00000001;
+
 -----------------------------------------------------多点打断管段-----------------------------------------------------------------------------------------------
 drop table breaked_guanduan;
 create table breaked_guanduan as
 select n.gid,i as cid,ST_GeometryN(n.geom, i) as geom from (
-select b.gid,ST_Split(b.geom,a.geom) as geom from 
+select b.gid,ST_Split(b.geom,st_buffer(a.geom,0.00000001)) as geom from 
 (select bid,ST_Union(geom) as geom from guanduan_new_break_breaked group by bid ) a,
-guanduan_new b where a.bid=b.gid) n CROSS JOIN generate_series(1,ST_NumGeometries(n.geom)) i;
+guanduan_new b where a.bid=b.gid) n CROSS JOIN generate_series(1,ST_NumGeometries(n.geom)) i where st_length(ST_GeometryN(n.geom, i))>0.00000005;
+
 create index breaked_guanduan_idx on breaked_guanduan using gist(geom);
 
 drop table guanduan_break_code;
 create table guanduan_break_code as
 select a.gid,a.cid,b.code as start_code,c.code as end_code,a.geom from breaked_guanduan a
-left join guanduan_new_code b on st_distance(b.geom,ST_StartPoint(ST_GeometryN(a.geom,1)))<0.00000000001
-left join guanduan_new_code c on st_distance(c.geom,ST_EndPoint(ST_GeometryN(a.geom,ST_NumGeometries(a.geom))))<0.00000000001
+left join guanduan_new_code b on st_distance(b.geom,ST_StartPoint(ST_GeometryN(a.geom,1)))<0.00000001
+left join guanduan_new_code c on st_distance(c.geom,ST_EndPoint(ST_GeometryN(a.geom,ST_NumGeometries(a.geom))))<0.00000001;
 
 -----------------------------------------------------合并生成新的管段-----------------------------------------------------------------------------------------------
 drop table new_guanduan;
@@ -224,97 +242,258 @@ create index start_index on guanduan_network(start_code);
 create index end_index on guanduan_network(end_code);
 
 -----------------------------------------------------爆管分析存储过程-----------------------------------------------------------------------------------------------
-drop function queryPipeline(lon float,lat float);
+drop function queryPipeline(lon float,lat float,f_arr varchar[],t_arr varchar[]) 
 
 CREATE OR REPLACE FUNCTION queryPipeline(lon float,lat float,f_arr varchar[],t_arr varchar[]) 
-returns int[] AS $idx$ DECLARE
+returns table(
+	id int,
+	famen_code varchar,
+	tiaoyaxiang_code varchar
+) AS $idx$ 
+DECLARE
 isNode int= 0;
 s_code int;
 r record;
 w record;
-v int[];
+break_length float =0;
+onoff_length float =0;
 BEGIN
 	select * into r from guanduan_network where st_transform(geom, 3857)<->st_transform(st_geomfromtext('POINT('||lon||' '||lat||')',4326), 3857)<15 order by geom<->st_geomfromtext('POINT('||lon||' '||lat||')',4326) limit 1;
-	if r is null then --如果当前管段就有开关
-		return v;
+	if r is null then --如果离管道太远，默认为没有爆管点
+		return next;
 	else
 		if (r.famen_code is not null and array_position(f_arr, r.famen_code) is null) or (r.tiaoyaxiang_code is not null and array_position(t_arr, r.tiaoyaxiang_code) is null) then --如果当前管段就有开关
-			isNode = 1;
-			select array_append(v,r.id) into v;
+			select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, st_geomfromtext('POINT('||lon||' '||lat||')',4326)),0.0000001)),1)) into break_length;
+			if r.famen_code is not null then
+				select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, geom),0.0000001)),1)) into onoff_length from famen_new where code=r.famen_code;
+			else
+				select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, geom),0.0000001)),1)) into onoff_length from tiaoyaxiang_new where code=r.tiaoyaxiang_code;
+			end if;
+			if break_length>onoff_length then --第一个管段，爆管点位于开关下游,返回当前管段就行
+				isNode = 1;
+				id:=r.id;
+				famen_code:=r.famen_code;
+				tiaoyaxiang_code:=r.tiaoyaxiang_code;
+				return next;
+			else
+				s_code = r.start_code;--当前管段的起点作为上一管段的终点
+				id:=r.id;
+				famen_code:=null;
+				tiaoyaxiang_code:=null;
+				return next;
+				while isNode=0 loop
+					select * into w from guanduan_network where end_code = s_code;--查询上一管段
+					if w is null then --已经查询到最后一级
+						isNode = 1;
+						id:=w.id;
+						famen_code:=w.famen_code;
+						tiaoyaxiang_code:=w.tiaoyaxiang_code;
+						return next;
+					else
+						if w.famen_code is null and w.tiaoyaxiang_code is null then --如果当前管段没有开关，则记录起点，循环到上一级管段
+							s_code = w.start_code;
+							id:=w.id;
+							famen_code:=w.famen_code;
+							tiaoyaxiang_code:=w.tiaoyaxiang_code;
+							return next;
+						else
+							if array_position(f_arr, w.famen_code) is not null or array_position(t_arr, w.tiaoyaxiang_code) is  not null then
+								s_code = w.start_code;
+								id:=w.id;
+								famen_code:=w.famen_code;
+								tiaoyaxiang_code:=w.tiaoyaxiang_code;
+								return next;
+							else
+								isNode = 1;
+								id:=w.id;
+								famen_code:=w.famen_code;
+								tiaoyaxiang_code:=w.tiaoyaxiang_code;
+								return next;
+							end if;
+						end if;
+					end if;
+				end loop;
+			end if;
 		else
 			s_code = r.start_code;--当前管段的起点作为上一管段的终点
-			select array_append(v,r.id) into v;
+			id:=r.id;
+			famen_code:=r.famen_code;
+			tiaoyaxiang_code:=r.tiaoyaxiang_code;
+			return next;
 			while isNode=0 loop
 				select * into w from guanduan_network where end_code = s_code;--查询上一管段
 				if w is null then --已经查询到最后一级
 					isNode = 1;
-					select array_append(v,w.id) into v;
+					id:=w.id;
+					famen_code:=w.famen_code;
+					tiaoyaxiang_code:=w.tiaoyaxiang_code;
+					return next;
 				else
 					if w.famen_code is null and w.tiaoyaxiang_code is null then --如果当前管段没有开关，则记录起点，循环到上一级管段
 						s_code = w.start_code;
-						select array_append(v,w.id) into v;
+						id:=w.id;
+						famen_code:=w.famen_code;
+						tiaoyaxiang_code:=w.tiaoyaxiang_code;
+						return next;
 					else
 						if array_position(f_arr, w.famen_code) is not null or array_position(t_arr, w.tiaoyaxiang_code) is  not null then
 							s_code = w.start_code;
-							select array_append(v,w.id) into v;
+							id:=w.id;
+							famen_code:=w.famen_code;
+							tiaoyaxiang_code:=w.tiaoyaxiang_code;
+							return next;
 						else
 							isNode = 1;
-							select array_append(v,w.id) into v;
+							id:=w.id;
+							famen_code:=w.famen_code;
+							tiaoyaxiang_code:=w.tiaoyaxiang_code;
+							return next;
 						end if;
 					end if;
 				end if;
 			end loop;
 		end if;
 	end if;
-	return v;
-END
+END;
 $idx$ LANGUAGE plpgsql;
 
-select * from guanduan_network where gid=2870;
 --爆管分析
-select queryPipeline(103.54019,29.405114,array['640100GB112005FMB001'],array['640100GB072008TYX001']);
-
-select queryPipeline(103.54175886, 29.40549524,null,null);
-
-select a.gid,a.cid,a.id,a.code,a.name,a.famen_code,a.tiaoyaxiang_code,''''||st_astext(a.geom)||''''||',' as wkt,st_astext(b.geom) as famen_wkt,st_astext(c.geom) as tiaoyaxiang_wkt from guanduan_network a
-left join famen_new b on a.famen_code=b.code
-left join tiaoyaxiang_new c on a.tiaoyaxiang_code=c.code
-where cast(id as int) = any(array(select queryPipeline(103.54175886, 29.40549524,null,null)));
+select a.gid,a.cid,a.id,a.code,a.name,d.famen_code,d.tiaoyaxiang_code,st_astext(a.geom) as wkt,st_astext(b.geom) as famen_wkt,st_astext(c.geom) as tiaoyaxiang_wkt from queryPipeline(103.5551550156749, 29.437856990113946,null,null) d left join famen_new b on d.famen_code=b.code left join tiaoyaxiang_new c on d.tiaoyaxiang_code=c.code left join guanduan_network a on a.id=d.id where d.id is not null;
 
 -----------------------------------------------------爆管分析下游受影响阀门存储过程---------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION queryDownPipeline(lon float,lat float) 
-returns int[] AS $idx$ DECLARE
+returns table(
+	id int,
+	famen_code varchar,
+	tiaoyaxiang_code varchar
+) 
+AS $idx$ DECLARE
 e_code int[];--当前层级终点集合
 te_code int[];--临时存储终点集合
 r record;
 w record;
-v int[];
+break_length float =0;
+onoff_length float =0;
 idx int[];--用于对数组赋值，达到清空数组的效果
+BEGIN
+	select * into r from guanduan_network where st_transform(geom, 3857)<->st_transform(st_geomfromtext('POINT('||lon||' '||lat||')',4326), 3857)<15 order by geom<->st_geomfromtext('POINT('||lon||' '||lat||')',4326) limit 1;
+	if r is null then --如果离管道太远，默认为没有爆管点
+		return next;
+	else
+		if (r.famen_code is not null) or (r.tiaoyaxiang_code is not null) then --如果当前管段就有开关
+			select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, st_geomfromtext('POINT('||lon||' '||lat||')',4326)),0.0000001)),1)) into break_length;
+			if r.famen_code is not null then
+				select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, geom),0.0000001)),1)) into onoff_length from famen_new where code=r.famen_code;
+			else
+				select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, geom),0.0000001)),1)) into onoff_length from tiaoyaxiang_new where code=r.tiaoyaxiang_code;
+			end if;
+			if break_length<onoff_length then --第一个管段，爆管点位于开关上游
+				id:=r.id;
+				famen_code:=r.famen_code;
+				tiaoyaxiang_code:=r.tiaoyaxiang_code;
+				return next;
+				select array_append(e_code,r.end_code) into e_code;--当前管段的终点作为下一管段的起点
+				while array_length(e_code,1) > 0  
+				loop
+					te_code = idx;
+					for w in
+						select * from guanduan_network where start_code = any(e_code) --查询下一管段
+					loop
+						id:=w.id;
+						famen_code:=w.famen_code;
+						tiaoyaxiang_code:=w.tiaoyaxiang_code;
+						select array_append(te_code,w.end_code) into te_code;
+						return next;
+					end loop;
+					e_code = te_code;
+				end loop;
+			else
+				id:=r.id;
+				famen_code:=null;
+				tiaoyaxiang_code:=null;
+				return next;
+				select array_append(e_code,r.end_code) into e_code;--当前管段的终点作为下一管段的起点
+				while array_length(e_code,1) > 0  
+				loop
+					te_code = idx;
+					for w in
+						select * from guanduan_network where start_code = any(e_code) --查询下一管段
+					loop
+						id:=w.id;
+						famen_code:=w.famen_code;
+						tiaoyaxiang_code:=w.tiaoyaxiang_code;
+						select array_append(te_code,w.end_code) into te_code;
+						return next;
+					end loop;
+					e_code = te_code;
+				end loop;
+			end if;
+		else
+			id:=r.id;
+			famen_code:=r.famen_code;
+			tiaoyaxiang_code:=r.tiaoyaxiang_code;
+			return next;
+			select array_append(e_code,r.end_code) into e_code;--当前管段的终点作为下一管段的起点
+			while array_length(e_code,1) > 0  
+			loop
+				te_code = idx;
+				for w in
+					select * from guanduan_network where start_code = any(e_code) --查询下一管段
+				loop
+					id:=w.id;
+					famen_code:=w.famen_code;
+					tiaoyaxiang_code:=w.tiaoyaxiang_code;
+					select array_append(te_code,w.end_code) into te_code;
+					return next;
+				end loop;
+				e_code = te_code;
+			end loop;
+		end if;
+	end if;
+END;
+$idx$ LANGUAGE plpgsql;
+
+--下游分析
+select gid,cid,code,name,famen_code,id,tiaoyaxiang_code,st_astext(geom) as wkt from guanduan_network where cast(id as int) = any(array(select queryDownPipeline(103.55461627535306, 29.438828789314563)));
+
+
+
+
+
+-----------------------------------------------------分析爆管点所在管段位置（同一管段，开关和爆管点谁是上游）---------------------------------------------------------------------------------
+drop function queryIsUpOrDown(lon float,lat float);
+
+CREATE OR REPLACE FUNCTION queryIsUpOrDown(lon float,lat float) 
+returns varchar AS $idx$ DECLARE
+r record;
+v varchar='';
+break_length float =0;
+onoff_length float =0;
 BEGIN
 	select * into r from guanduan_network where st_transform(geom, 3857)<->st_transform(st_geomfromtext('POINT('||lon||' '||lat||')',4326), 3857)<15 order by geom<->st_geomfromtext('POINT('||lon||' '||lat||')',4326) limit 1;
 	if r is null then --如果当前管段就有开关
 		return v;
 	else
-		select array_append(v,r.id) into v;
-		select array_append(e_code,r.end_code) into e_code;--当前管段的终点作为下一管段的起点
-		while array_length(e_code,1) > 0  
-		loop
-			te_code = idx;
-			for w in
-				select * from guanduan_network where start_code = any(e_code) --查询下一管段
-			loop
-				select array_append(v,w.id) into v;
-				select array_append(te_code,w.end_code) into te_code;
-			end loop;
-			e_code = te_code;
-		end loop;
+		if (r.famen_code is not null) or (r.tiaoyaxiang_code is not null) then --如果当前管段就有开关
+			select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, st_geomfromtext('POINT('||lon||' '||lat||')',4326)),0.0000001)),1)) into break_length;
+			if r.famen_code is not null then
+				select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, geom),0.0000001)),1)) into onoff_length from famen_new where code=r.famen_code;
+			else
+				select st_length(st_geometryn(st_split(r.geom,st_buffer(st_closestpoint(r.geom, geom),0.0000001)),1)) into onoff_length from tiaoyaxiang_new where code=r.tiaoyaxiang_code;
+			end if;
+			if break_length > onoff_length then
+				if r.famen_code is not null then
+					v=r.famen_code;
+				else
+					v=r.tiaoyaxiang_code;
+				end if;
+			end if;
+		end if;
 	end if;
 	return v;
 END
 $idx$ LANGUAGE plpgsql;
 
---下游分析
-select queryDownPipeline(103.538976,29.42136);
+select queryIsUpOrDown(103.55461627535306, 29.438828789314563);
 
-select gid,cid,code,name,famen_code,id,tiaoyaxiang_code,st_astext(geom) as wkt from guanduan_network where cast(id as int) = any(array(select queryDownPipeline(103.54169218,29.40993202)));
 
